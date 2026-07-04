@@ -35,6 +35,8 @@ const IDX_DARK: u8 = 3;
 const IDX_FIELD_BG: u8 = 4;
 /// 空セルのグリッド線 (パレット 0 のみ)。
 const IDX_GRID: u8 = 5;
+/// HUD テキスト色 (パレット 0 のみ)。
+pub(crate) const IDX_TEXT: u8 = 6;
 
 /// フィールド空セルの地色 (暗い青灰)。
 const FIELD_BG_COLOUR: u16 = rgb555(1, 1, 3);
@@ -72,11 +74,13 @@ const fn block_palette(colour: u16) -> Palette16 {
     Palette16::new(colours)
 }
 
-/// パレット 0: 色 0 = バックドロップ (フィールド外の画面地色)、壁グレー、グリッド線。
+/// パレット 0: 色 0 = バックドロップ (フィールド外の画面地色)、壁グレー、グリッド線、
+/// HUD テキスト。
 const fn ui_palette() -> Palette16 {
     let mut palette = block_palette(rgb555(14, 14, 15));
     palette.update_colour(0, Rgb15(rgb555(2, 2, 3)));
     palette.update_colour(IDX_GRID as usize, Rgb15(rgb555(3, 3, 6)));
+    palette.update_colour(IDX_TEXT as usize, Rgb15(rgb555(29, 29, 31)));
     palette
 }
 
@@ -106,12 +110,12 @@ const fn palette_of(kind: Tetromino) -> u8 {
 }
 
 /// ミノ色パレットを選ぶ [`TileEffect`]。
-const fn piece_effect(kind: Tetromino) -> TileEffect {
+pub(crate) const fn piece_effect(kind: Tetromino) -> TileEffect {
     TileEffect::new(false, false, palette_of(kind))
 }
 
 /// パレット 0 (UI 色) を選ぶ [`TileEffect`]。
-const fn ui_effect() -> TileEffect {
+pub(crate) const fn ui_effect() -> TileEffect {
     TileEffect::new(false, false, 0)
 }
 
@@ -236,7 +240,8 @@ fn overlay(cells: &mut [[Cell; FIELD_WIDTH]; VISIBLE_HEIGHT], piece: &ActivePiec
 }
 
 /// ベベル付き塗りつぶしブロック: 左上辺ハイライト・右下辺影・中央は基本色。
-fn make_block_tile() -> DynamicTile16 {
+/// HUD のミノプレビューにも同じ形状を使う。
+pub(crate) fn make_block_tile() -> DynamicTile16 {
     let mut tile = DynamicTile16::new().fill_with(IDX_BASE);
     for i in 0..8 {
         tile.set_pixel(i, 0, IDX_LIGHT);

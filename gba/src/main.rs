@@ -2,11 +2,13 @@
 #![no_main]
 
 mod buttons;
+mod hud;
 mod render;
 
 use agb::input::ButtonController;
 use retris_core::Game;
 
+use crate::hud::Hud;
 use crate::render::Renderer;
 
 // TODO(後工程・タイトル画面): シード収集 (ボタン押下までの経過フレーム等) と
@@ -17,7 +19,8 @@ const START_LEVEL: u32 = 1;
 #[agb::entry]
 fn main(mut gba: agb::Gba) -> ! {
     let mut gfx = gba.graphics.get();
-    let mut renderer = Renderer::new(&mut gfx);
+    let mut renderer = Renderer::new(&mut gfx); // パレット登録を含むため Hud より先
+    let mut hud = Hud::new();
     let mut input = ButtonController::new();
 
     let mut game = Game::new(FIXED_SEED, START_LEVEL);
@@ -37,9 +40,11 @@ fn main(mut gba: agb::Gba) -> ! {
         }
 
         renderer.render(&game);
+        hud.update(&game); // events() は同フレーム内に読む必要がある
 
         let mut frame = gfx.frame();
         renderer.show(&mut frame);
+        hud.show(&mut frame);
         frame.commit(); // VBlank 待ちを含む
     }
 }
