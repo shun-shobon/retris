@@ -1,0 +1,17 @@
+[package]
+name = "retris"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+agb = "=0.24.0"
+retris-core = { path = "../core" }
+
+[profile.dev]
+opt-level = 3
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+debug = true
