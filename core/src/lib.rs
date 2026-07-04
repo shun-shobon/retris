@@ -13,7 +13,9 @@ pub mod lock_delay;
 pub mod physics;
 pub mod piece;
 pub mod rng;
+pub mod score;
 pub mod srs;
+pub mod tspin;
 
 pub use active::ActivePiece;
 pub use bag::{NEXT_COUNT, PieceQueue};
@@ -24,4 +26,6 @@ pub use physics::{
 };
 pub use piece::{Rotation, Tetromino};
 pub use rng::Rng;
+pub use score::Scoring;
 pub use srs::{RotateDir, RotateOutcome, try_rotate};
+pub use tspin::{TSpin, detect_tspin};
