@@ -73,6 +73,34 @@ impl Board {
             self.set(x, y, Some(piece.kind));
         }
     }
+
+    /// ライン消去 (仕様書 §9.1)。
+    ///
+    /// `y = 0..39` の全行を走査し、10 セルすべて埋まった行を消去して
+    /// 上の行を詰めて落とす (ナイーブ重力。連鎖落下なし)。消去した行数を返す。
+    pub fn clear_full_lines(&mut self) -> u8 {
+        let mut write = 0;
+        for read in 0..FIELD_HEIGHT {
+            if self.cells[read].iter().all(Option::is_some) {
+                continue; // 満杯行はコピーせず読み飛ばす = 消去
+            }
+            if write != read {
+                self.cells[write] = self.cells[read];
+            }
+            write += 1;
+        }
+        // 詰めた分だけ最上部を空行で埋める。
+        for row in &mut self.cells[write..] {
+            *row = [None; FIELD_WIDTH];
+        }
+        (FIELD_HEIGHT - write) as u8
+    }
+
+    /// フィールドが完全に空か (Perfect Clear 判定用、仕様書 §9.6)。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cells.iter().all(|row| row.iter().all(Option::is_none))
+    }
 }
 
 impl Default for Board {
@@ -248,6 +276,119 @@ mod tests {
         let mut board = Board::new();
         board.set(4, 22, Some(Tetromino::J));
         assert!(board.fits(&ActivePiece::spawn(Tetromino::T)));
+    }
+
+    /// 指定行の全 10 セルを `kind` で埋める (テスト用の地形構築)。
+    fn fill_row(board: &mut Board, y: i8, kind: Tetromino) {
+        for x in 0..10 {
+            board.set(x, y, Some(kind));
+        }
+    }
+
+    /// フィールド全体の占有セル数。
+    fn occupied_count(board: &Board) -> usize {
+        (0..40)
+            .flat_map(|y| (0..10).map(move |x| (x, y)))
+            .filter(|&(x, y)| board.is_occupied(x, y))
+            .count()
+    }
+
+    #[test]
+    fn clear_full_lines_returns_zero_when_no_full_row() {
+        let mut board = Board::new();
+        board.set(0, 0, Some(Tetromino::T));
+        // 9 セルのみ埋めた行 (非満杯) は消えない。
+        for x in 0..9 {
+            board.set(x, 1, Some(Tetromino::J));
+        }
+        let before = board.clone();
+        assert_eq!(board.clear_full_lines(), 0);
+        assert_eq!(board, before, "消去なしなら盤面は不変");
+    }
+
+    #[test]
+    fn clear_full_lines_clears_single_row_and_shifts_down() {
+        let mut board = Board::new();
+        fill_row(&mut board, 0, Tetromino::J);
+        board.set(0, 1, Some(Tetromino::T));
+        board.set(5, 2, Some(Tetromino::L));
+        assert_eq!(board.clear_full_lines(), 1);
+        // 上の行が 1 行ずつ落ち、セル内容 (ミノ種別) も一緒に移動する。
+        assert_eq!(board.get(0, 0), Some(Tetromino::T));
+        assert_eq!(board.get(5, 1), Some(Tetromino::L));
+        assert_eq!(board.get(0, 1), None);
+        assert_eq!(board.get(5, 2), None);
+        assert_eq!(occupied_count(&board), 2);
+    }
+
+    #[test]
+    fn clear_full_lines_clears_contiguous_rows() {
+        let mut board = Board::new();
+        fill_row(&mut board, 0, Tetromino::I);
+        fill_row(&mut board, 1, Tetromino::O);
+        board.set(2, 2, Some(Tetromino::S));
+        assert_eq!(board.clear_full_lines(), 2);
+        assert_eq!(board.get(2, 0), Some(Tetromino::S));
+        assert_eq!(occupied_count(&board), 1);
+    }
+
+    #[test]
+    fn clear_full_lines_clears_non_contiguous_rows() {
+        // y=0 と y=2 が満杯、間の y=1 は非満杯 (§9.1 のナイーブ重力)。
+        let mut board = Board::new();
+        fill_row(&mut board, 0, Tetromino::I);
+        board.set(0, 1, Some(Tetromino::T));
+        board.set(9, 1, Some(Tetromino::Z));
+        fill_row(&mut board, 2, Tetromino::O);
+        board.set(4, 3, Some(Tetromino::L));
+        assert_eq!(board.clear_full_lines(), 2);
+        // 旧 y=1 → 新 y=0。
+        assert_eq!(board.get(0, 0), Some(Tetromino::T));
+        assert_eq!(board.get(9, 0), Some(Tetromino::Z));
+        assert_eq!(board.get(1, 0), None);
+        // 旧 y=3 → 新 y=1。
+        assert_eq!(board.get(4, 1), Some(Tetromino::L));
+        assert_eq!(occupied_count(&board), 3);
+    }
+
+    #[test]
+    fn clear_full_lines_shifts_top_buffer_row() {
+        // 40 行全体の整合: 最上行 y=39 のブロックも 1 行落ちる。
+        let mut board = Board::new();
+        fill_row(&mut board, 0, Tetromino::J);
+        board.set(3, 39, Some(Tetromino::I));
+        assert_eq!(board.clear_full_lines(), 1);
+        assert_eq!(board.get(3, 38), Some(Tetromino::I));
+        assert_eq!(board.get(3, 39), None);
+    }
+
+    #[test]
+    fn clear_full_lines_clears_entire_full_board() {
+        let mut board = Board::new();
+        for y in 0..40 {
+            fill_row(&mut board, y, Tetromino::L);
+        }
+        assert_eq!(board.clear_full_lines(), 40);
+        assert!(board.is_empty());
+    }
+
+    #[test]
+    fn is_empty_reports_board_state() {
+        let mut board = Board::new();
+        assert!(board.is_empty());
+        board.set(4, 20, Some(Tetromino::T));
+        assert!(!board.is_empty());
+        board.set(4, 20, None);
+        assert!(board.is_empty());
+    }
+
+    #[test]
+    fn clear_full_lines_then_board_is_empty_for_perfect_clear() {
+        // Perfect Clear の判定材料: 消去後に盤面が完全に空 (§9.6)。
+        let mut board = Board::new();
+        fill_row(&mut board, 0, Tetromino::I);
+        assert_eq!(board.clear_full_lines(), 1);
+        assert!(board.is_empty());
     }
 
     #[test]
