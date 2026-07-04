@@ -7,11 +7,15 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod active;
+pub mod bag;
 pub mod board;
 pub mod piece;
+pub mod rng;
 pub mod srs;
 
 pub use active::ActivePiece;
+pub use bag::{NEXT_COUNT, PieceQueue};
 pub use board::{Board, FIELD_HEIGHT, FIELD_WIDTH, VISIBLE_HEIGHT};
 pub use piece::{Rotation, Tetromino};
+pub use rng::Rng;
 pub use srs::{RotateDir, RotateOutcome, try_rotate};
