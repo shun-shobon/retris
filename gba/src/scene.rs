@@ -7,8 +7,9 @@
 
 use agb::display::GraphicsFrame;
 use agb::input::{ButtonController, ButtonState};
-use retris_core::{Game, Phase};
+use retris_core::{Game, Phase, TSpin};
 
+use crate::audio::Audio;
 use crate::buttons;
 use crate::hud::Hud;
 use crate::render::Renderer;
@@ -31,17 +32,19 @@ impl Scene {
     }
 
     /// 1 フレーム進め、遷移があれば次のシーンを返す。
-    pub fn update(self, input: &ButtonController) -> Self {
+    pub fn update(self, input: &ButtonController, audio: &mut Audio) -> Self {
         match self {
             Self::Title(mut title) => match title.update(input) {
                 Some((seed, level)) => {
                     agb::println!("retris: start (seed={seed:#x}, level={level})");
+                    audio.play_start();
+                    audio.start_bgm();
                     Self::Playing(PlayScreen::new(seed, level))
                 }
                 None => Self::Title(title),
             },
             Self::Playing(mut play) => {
-                if play.update(input) {
+                if play.update(input, audio) {
                     agb::println!("retris: game over (score={})", play.game.score());
                     Self::GameOver(play)
                 } else {
@@ -88,26 +91,81 @@ impl PlayScreen {
     }
 
     /// 1 フレーム進める。ゲームオーバーに遷移したフレームで `true` を返す。
-    fn update(&mut self, input: &ButtonController) -> bool {
+    fn update(&mut self, input: &ButtonController, audio: &mut Audio) -> bool {
         self.game.update(buttons::read(input));
         self.renderer.render(&self.game);
         self.hud.update(&self.game); // events() は同フレーム内に読む必要がある
+        self.play_sfx(audio);
 
-        // ポーズ表示 (§14.3): フィールドを隠して「PAUSE」を出す。
+        // ポーズ表示 (§14.3): フィールドを隠して「PAUSE」を出す。BGM も止める。
         let paused = matches!(self.game.phase(), Phase::Paused);
         if paused != self.pause_shown {
             self.hud.set_pause_overlay(paused);
+            if paused {
+                audio.pause_bgm();
+            } else {
+                audio.resume_bgm();
+            }
             self.pause_shown = paused;
         }
 
         if self.game.events().topped_out {
             // ゲームオーバー演出 (§14.4): 盤面グレーアウト + 表示。
-            // スコア等は HUD に出たまま残る。
+            // スコア等は HUD に出たまま残る。BGM を止めて SE を鳴らす。
+            audio.stop_bgm();
+            audio.play_game_over();
             self.renderer.greyout(&self.game);
             self.hud.draw_game_over_overlay();
             true
         } else {
             false
+        }
+    }
+
+    /// このフレームのイベントから SE を選んで鳴らす。
+    ///
+    /// - ロックしたフレームはロック系 1 音のみ:
+    ///   Perfect Clear > テトリス (4 列) > T-Spin > 消去数別 > ハードドロップ >
+    ///   通常ロック。レベルアップはそれに重ねて鳴らす。
+    /// - 移動・回転・ソフトドロップは連打されるため控えめ音量 (audio 側で調整)。
+    /// - ゲームオーバー音は呼び出し元が BGM 停止とセットで鳴らす。
+    fn play_sfx(&self, audio: &mut Audio) {
+        let events = self.game.events();
+        if events.topped_out {
+            return;
+        }
+
+        if let Some(lock) = events.locked {
+            if lock.perfect_clear {
+                audio.play_perfect_clear();
+            } else if lock.lines_cleared == 4 {
+                audio.play_tetris();
+            } else if lock.tspin != TSpin::None {
+                audio.play_tspin();
+            } else if lock.lines_cleared > 0 {
+                audio.play_line_clear(lock.lines_cleared);
+            } else if events.hard_dropped {
+                audio.play_hard_drop();
+            } else {
+                audio.play_lock();
+            }
+
+            if lock.level_up {
+                audio.play_level_up();
+            }
+        } else {
+            if events.hold_performed {
+                audio.play_hold();
+            }
+            if events.rotated {
+                audio.play_rotate();
+            }
+            if events.shifted {
+                audio.play_move();
+            }
+            if events.soft_drop_rows > 0 {
+                audio.play_soft_drop();
+            }
         }
     }
 
