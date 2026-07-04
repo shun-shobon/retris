@@ -61,6 +61,16 @@ impl Scoring {
         self.combo
     }
 
+    /// この消去に B2B 倍率 ×1.5 が掛かるか (§9.3) =
+    /// 「難しい消去」かつ B2B チェーン継続中。
+    ///
+    /// [`Self::on_lock`] はチェーン状態を更新するため、判定したいロックの
+    /// `on_lock` を呼ぶ**前**に評価すること。
+    #[must_use]
+    pub const fn b2b_applies(&self, lines_cleared: u8, tspin: TSpin) -> bool {
+        is_hard_clear(lines_cleared, tspin) && self.b2b
+    }
+
     /// 表示用レベル (§11 Fixed Goal): `start_level + total_lines / 10`。上限なし。
     #[must_use]
     pub const fn level(&self) -> u32 {
@@ -84,10 +94,8 @@ impl Scoring {
         // スコア倍率のレベルは消去発生時点 = total_lines 加算前の値 (§9.2)。
         let level = self.effective_level();
 
-        // 「難しい消去」= Tetris、および消去を伴う T-Spin / Mini (§9.3)。
-        let is_hard_clear =
-            lines_cleared == 4 || (lines_cleared > 0 && !matches!(tspin, TSpin::None));
-        let b2b_applied = is_hard_clear && self.b2b;
+        let hard_clear = is_hard_clear(lines_cleared, tspin);
+        let b2b_applied = self.b2b_applies(lines_cleared, tspin);
 
         // 基本点 × B2B 倍率 (×1.5、floor) × level (§9.2, §9.3)。
         let base = base_points(lines_cleared, tspin);
@@ -111,7 +119,7 @@ impl Scoring {
 
         // B2B チェーン更新 (§9.3): 難しい消去で継続、通常消去で切れる。
         // 消去なしロック (消去なし T-Spin 含む) では変化しない。
-        if is_hard_clear {
+        if hard_clear {
             self.b2b = true;
         } else if lines_cleared > 0 {
             self.b2b = false;
@@ -131,6 +139,11 @@ impl Scoring {
     pub fn add_hard_drop_cells(&mut self, cells: u32) {
         self.score += 2 * cells.min(20);
     }
+}
+
+/// 「難しい消去」= Tetris、および消去を伴う T-Spin / Mini か (仕様書 §9.3)。
+const fn is_hard_clear(lines_cleared: u8, tspin: TSpin) -> bool {
+    lines_cleared == 4 || (lines_cleared > 0 && !matches!(tspin, TSpin::None))
 }
 
 /// 基本スコア表 (仕様書 §9.2、level を掛ける前の値)。
@@ -292,6 +305,25 @@ mod tests {
         assert_eq!(s.on_lock(0, TSpin::Full, false), 400);
         assert!(!s.b2b());
         assert_eq!(s.on_lock(4, TSpin::None, false), 800); // チェーンは繋がっていない
+    }
+
+    #[test]
+    fn b2b_applies_reflects_chain_state_before_lock() {
+        let mut s = Scoring::new(1);
+        assert!(!s.b2b_applies(4, TSpin::None), "チェーン開始前は掛からない");
+        s.on_lock(4, TSpin::None, false); // チェーン開始
+        assert!(s.b2b_applies(4, TSpin::None), "Tetris");
+        assert!(s.b2b_applies(2, TSpin::Full), "TSD");
+        assert!(s.b2b_applies(1, TSpin::Mini), "Mini TSS");
+        assert!(!s.b2b_applies(1, TSpin::None), "通常消去には掛からない");
+        assert!(
+            !s.b2b_applies(0, TSpin::Full),
+            "消去なし T-Spin には掛からない"
+        );
+        assert!(
+            !s.b2b_applies(0, TSpin::None),
+            "消去なしロックには掛からない"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub mod tspin;
 pub use active::ActivePiece;
 pub use bag::{NEXT_COUNT, PieceQueue};
 pub use board::{Board, FIELD_HEIGHT, FIELD_WIDTH, VISIBLE_HEIGHT};
-pub use game::{ARR_FRAMES, DAS_FRAMES, Game, Phase};
+pub use game::{ARR_FRAMES, DAS_FRAMES, FrameEvents, Game, LockEvent, Phase};
 pub use input::Buttons;
 pub use lock_delay::{LOCK_DELAY_FRAMES, LOCK_RESET_MAX, LockDelay};
 pub use physics::{

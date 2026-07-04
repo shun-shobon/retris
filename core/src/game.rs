@@ -15,7 +15,7 @@ use crate::physics::{
 use crate::piece::Tetromino;
 use crate::score::Scoring;
 use crate::srs::{RotateDir, RotateOutcome, try_rotate};
-use crate::tspin::detect_tspin;
+use crate::tspin::{TSpin, detect_tspin};
 
 /// DAS: 押下から初回リピートまでの遅延フレーム数 (仕様書 §12.2, §15)。
 pub const DAS_FRAMES: u8 = 10;
@@ -43,6 +43,50 @@ struct Das {
     timer: u8,
 }
 
+/// このフレームで発生したロックの詳細 (HUD・効果音・演出用)。
+///
+/// ロックアウト (§13) で即ゲームオーバーになったロックでは発行されない
+/// (スコア処理まで進まないため。[`FrameEvents::topped_out`] のみ立つ)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LockEvent {
+    /// 消去ライン数 (0 = 消去なしロック)。
+    pub lines_cleared: u8,
+    /// T-Spin 判定 (§10)。
+    pub tspin: TSpin,
+    /// この消去に B2B 倍率 ×1.5 が掛かったか (§9.3)。
+    pub b2b_applied: bool,
+    /// この消去時点のコンボ数 (§9.4)。消去なしロックでは −1。
+    pub combo: i16,
+    /// Perfect Clear か (§9.6)。
+    pub perfect_clear: bool,
+    /// このロックでの加点 (§9.7)。ソフト/ハードドロップ点 (§9.5) は含まない。
+    pub points_awarded: u32,
+    /// このロックでレベルが上がったか (§11)。
+    pub level_up: bool,
+}
+
+/// 直近の [`Game::update`] 1 フレームで起きたこと (HUD・効果音・演出用)。
+///
+/// 毎 update の冒頭でクリアされるため、GBA 層は update 直後に読み取ること。
+/// ポーズ中・ゲームオーバー後の update ではすべて空になる。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameEvents {
+    /// このフレームでロックが発生したときの詳細。
+    pub locked: Option<LockEvent>,
+    /// ホールドが実行された (§6.2)。
+    pub hold_performed: bool,
+    /// ハードドロップが実行された (§7.4)。0 セル落下の据え置きロックも含む。
+    pub hard_dropped: bool,
+    /// 回転が成功した (§4)。不発・O ミノの回転入力では立たない。
+    pub rotated: bool,
+    /// 左右移動が成功した (§12.2)。壁などによる移動失敗では立たない。
+    pub shifted: bool,
+    /// このフレームのソフトドロップによる落下行数 (§7.3)。
+    pub soft_drop_rows: u8,
+    /// このフレームで GameOver に遷移した (§13)。
+    pub topped_out: bool,
+}
+
 /// ゲーム全体の状態 (仕様書 §14)。
 ///
 /// 毎フレーム [`Self::update`] を 1 回呼ぶこと。処理順は §14.2 に従う。
@@ -65,6 +109,8 @@ pub struct Game {
     /// 最後の回転で成立したキックテスト番号 1〜5 (§10.3 のキック 5 例外用)。
     last_kick: u8,
     phase: Phase,
+    /// 直近の update で起きたこと (update 冒頭でクリア)。
+    events: FrameEvents,
 }
 
 impl Game {
@@ -99,6 +145,7 @@ impl Game {
             last_action_was_rotation: false,
             last_kick: 0,
             phase: Phase::Playing,
+            events: FrameEvents::default(),
         };
         game.spawn(first);
         game
@@ -121,6 +168,8 @@ impl Game {
     /// 前フレーム状態とみなし、押しっぱなしのボタンをエッジと誤検出しない
     /// (詳細は [`Self::new`] のドキュメント)。
     pub fn update(&mut self, buttons: Buttons) {
+        // (0) フレームイベントのクリア。GBA 層は update 直後に読み取ること。
+        self.events = FrameEvents::default();
         if matches!(self.phase, Phase::GameOver) {
             return;
         }
@@ -244,6 +293,27 @@ impl Game {
         self.phase
     }
 
+    /// 直近の [`Self::update`] で起きたイベント (HUD・効果音・演出用)。
+    ///
+    /// update 冒頭でクリアされるため、毎フレーム update 直後に読み取ること。
+    /// 一度も update していない場合はすべて空。
+    #[must_use]
+    pub const fn events(&self) -> &FrameEvents {
+        &self.events
+    }
+
+    /// コンボカウンタ (§9.4)。−1 = コンボなし。
+    #[must_use]
+    pub const fn combo(&self) -> i16 {
+        self.scoring.combo()
+    }
+
+    /// B2B チェーン継続中か (§9.3)。
+    #[must_use]
+    pub const fn b2b(&self) -> bool {
+        self.scoring.b2b()
+    }
+
     // ---- 内部処理 ----
 
     /// §3.2 のスポーン処理: ブロックアウト判定 → 1 行落下試行 → 各状態リセット。
@@ -255,6 +325,7 @@ impl Game {
         if !self.board.fits(&piece) {
             // ブロックアウト (§13): 生成位置が既存ブロックと重なる。
             self.phase = Phase::GameOver;
+            self.events.topped_out = true;
             return;
         }
         let piece = try_fall(&self.board, &piece).unwrap_or(piece);
@@ -275,6 +346,7 @@ impl Game {
         const VISIBLE_TOP: i8 = VISIBLE_HEIGHT as i8;
         if piece.cells().iter().all(|&(_, y)| y >= VISIBLE_TOP) {
             self.phase = Phase::GameOver;
+            self.events.topped_out = true;
             return;
         }
 
@@ -286,7 +358,20 @@ impl Game {
         );
         let lines = self.board.clear_full_lines();
         let perfect_clear = lines > 0 && self.board.is_empty();
-        self.scoring.on_lock(lines, tspin, perfect_clear);
+        // イベント発行 (HUD・SE 用): B2B 適用とレベルは on_lock による更新前後の
+        // 比較で確定するため、この順序で評価する。
+        let level_before = self.scoring.level();
+        let b2b_applied = self.scoring.b2b_applies(lines, tspin);
+        let points_awarded = self.scoring.on_lock(lines, tspin, perfect_clear);
+        self.events.locked = Some(LockEvent {
+            lines_cleared: lines,
+            tspin,
+            b2b_applied,
+            combo: self.scoring.combo(),
+            perfect_clear,
+            points_awarded,
+            level_up: self.scoring.level() > level_before,
+        });
         self.hold_used = false; // §6.2: ロックで再ホールド可能に
         let next = self.queue.pop();
         self.spawn(next);
@@ -296,12 +381,14 @@ impl Game {
     fn do_hold(&mut self) {
         let stored = self.hold.replace(self.active.kind);
         self.hold_used = true;
+        self.events.hold_performed = true;
         let next = stored.unwrap_or_else(|| self.queue.pop());
         self.spawn(next);
     }
 
     /// ハードドロップ (§7.4): 接地位置まで即落下し、ロックディレイを無視して即ロック。
     fn hard_drop(&mut self) {
+        self.events.hard_dropped = true;
         let target = ghost(&self.board, &self.active);
         let cells = u32::from((self.active.y - target.y).unsigned_abs());
         self.scoring.add_hard_drop_cells(cells);
@@ -321,6 +408,7 @@ impl Game {
                 self.active = piece;
                 self.last_action_was_rotation = true;
                 self.last_kick = kick;
+                self.events.rotated = true;
                 self.lock_delay
                     .notify_move(is_grounded(&self.board, &piece));
             }
@@ -380,6 +468,7 @@ impl Game {
         if let Some(moved) = try_shift(&self.board, &self.active, dx) {
             self.active = moved;
             self.last_action_was_rotation = false; // §10.1-2
+            self.events.shifted = true;
             self.lock_delay
                 .notify_move(is_grounded(&self.board, &moved)); // §8.2-2
         }
@@ -404,6 +493,7 @@ impl Game {
             self.lock_delay.notify_fall(fallen.y); // §8.2-5
             if soft_drop {
                 self.scoring.add_soft_drop_cells(1);
+                self.events.soft_drop_rows += 1;
             }
         }
     }
@@ -906,13 +996,11 @@ mod tests {
 
     // ---- T-Spin フロー統合 (§9.2, §10) ----
 
-    #[test]
-    fn tspin_double_flow_awards_full_tspin_score() {
-        let mut game = game(); // 先頭ミノは T
-        // TSD 地形 (tspin.rs の tsd_setup と同型):
-        //   y=2: . . . S . . . . . .   ← (3,2) が庇
-        //   y=1: L L L _ _ _ L L L L
-        //   y=0: J J J J _ J J J J J
+    /// TSD 地形を作る (tspin.rs の tsd_setup と同型):
+    ///   y=2: . . . S . . . . . .   ← (3,2) が庇
+    ///   y=1: L L L _ _ _ L L L L
+    ///   y=0: J J J J _ J J J J J
+    fn build_tsd_field(game: &mut Game) {
         for x in 0..10 {
             if x != 4 {
                 game.board.set(x, 0, Some(Tetromino::J));
@@ -922,6 +1010,12 @@ mod tests {
             }
         }
         game.board.set(3, 2, Some(Tetromino::S));
+    }
+
+    #[test]
+    fn tspin_double_flow_awards_full_tspin_score() {
+        let mut game = game(); // 先頭ミノは T
+        build_tsd_field(&mut game);
 
         run(&mut game, down(), 48); // f1-48: 16 セル落下して庇の上 (by=2) に接地
         assert_eq!((active(&game).y, game.score()), (2, 16));
@@ -1084,6 +1178,210 @@ mod tests {
         game.update(idle()); // f137: 接地 30 フレーム目でロック
         assert_eq!(active(&game).kind, Tetromino::Z);
         assert_eq!(game.board().get(3, 17), Some(Tetromino::T));
+    }
+
+    // ---- フレームイベント (HUD・効果音・演出用) ----
+
+    #[test]
+    fn quiet_frame_has_no_events() {
+        let mut game = game();
+        assert_eq!(*game.events(), FrameEvents::default(), "update 前は空");
+        game.update(idle()); // f0: 何も起きないフレーム
+        assert_eq!(*game.events(), FrameEvents::default());
+        assert_eq!(game.combo(), -1);
+        assert!(!game.b2b());
+    }
+
+    #[test]
+    fn hard_drop_without_clear_reports_lock_event() {
+        let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(up()); // f1: 19 セルのハードドロップ、消去なし
+        let events = game.events();
+        assert!(events.hard_dropped);
+        assert_eq!(
+            events.locked,
+            Some(LockEvent {
+                lines_cleared: 0,
+                tspin: TSpin::None,
+                b2b_applied: false,
+                combo: -1,
+                perfect_clear: false,
+                points_awarded: 0,
+                level_up: false,
+            }),
+            "ドロップ点 (38) は points_awarded に含まない (§9.5)"
+        );
+        assert!(!events.hold_performed);
+        assert!(!events.topped_out);
+        assert_eq!(game.score(), 38);
+        game.update(idle()); // f2: イベントは 1 フレームでクリアされる
+        assert_eq!(*game.events(), FrameEvents::default());
+    }
+
+    #[test]
+    fn line_clear_lock_event_reports_points_and_combo() {
+        let mut game = game();
+        for x in [0, 1, 2, 6, 7, 8, 9] {
+            game.board.set(x, 0, Some(Tetromino::L));
+        }
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(up()); // f1: T が x=3..5 を埋めて Single
+        let locked = game.events().locked.expect("ロック発生");
+        assert_eq!(locked.lines_cleared, 1);
+        assert_eq!(locked.tspin, TSpin::None);
+        assert_eq!(locked.points_awarded, 100, "Single 100 × level 1 (§9.2)");
+        assert_eq!(locked.combo, 0, "最初の消去は combo 0 (§9.4)");
+        assert!(!locked.b2b_applied);
+        assert!(!locked.perfect_clear);
+        assert!(!locked.level_up);
+        assert_eq!(game.combo(), 0);
+        assert!(!game.b2b(), "Single では B2B チェーンは始まらない (§9.3)");
+    }
+
+    #[test]
+    fn tspin_double_lock_event_reports_tspin_b2b_and_combo() {
+        let mut game = game();
+        build_tsd_field(&mut game);
+        // B2B チェーンとコンボを事前に開始しておく (Tetris 相当を直接注入)。
+        game.scoring.on_lock(4, TSpin::None, false);
+        assert!(game.b2b());
+        // tspin_double_flow_awards_full_tspin_score と同じ TSD 操作。
+        run(&mut game, down(), 48);
+        game.update(Buttons {
+            down: true,
+            rotate_cw: true,
+            ..Buttons::default()
+        });
+        run(&mut game, down(), 5);
+        game.update(cw());
+        game.update(idle());
+        game.update(up()); // 据え置きハードドロップ → TSD ロック
+        let locked = game.events().locked.expect("ロック発生");
+        assert_eq!(locked.lines_cleared, 2);
+        assert_eq!(locked.tspin, TSpin::Full);
+        assert!(locked.b2b_applied, "B2B 継続中の TSD (§9.3)");
+        assert_eq!(locked.combo, 1, "注入した Tetris が combo 0");
+        assert!(!locked.perfect_clear);
+        // floor(1200 × 1.5) × level 1 + コンボ 50×1×1 = 1850 (§9.7)。
+        assert_eq!(locked.points_awarded, 1850);
+        assert!(game.events().hard_dropped);
+        assert!(game.b2b());
+        assert_eq!(game.combo(), 1);
+    }
+
+    #[test]
+    fn hold_sets_hold_performed_event() {
+        let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(hold()); // f1
+        let events = game.events();
+        assert!(events.hold_performed);
+        assert_eq!(events.locked, None);
+        assert!(!events.hard_dropped);
+        game.update(idle()); // f2: クリアされる
+        assert!(!game.events().hold_performed);
+    }
+
+    #[test]
+    fn level_up_is_reported_on_lock_event() {
+        let mut game = game();
+        // 9 ライン分を注入して、次の Single でレベルアップする状態にする。
+        for _ in 0..3 {
+            game.scoring.on_lock(3, TSpin::None, false);
+        }
+        game.scoring.on_lock(0, TSpin::None, false); // コンボを切る
+        for x in [0, 1, 2, 6, 7, 8, 9] {
+            game.board.set(x, 0, Some(Tetromino::L));
+        }
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(up()); // f1: Single で 10 ライン到達
+        let locked = game.events().locked.expect("ロック発生");
+        assert!(locked.level_up);
+        assert_eq!(
+            locked.points_awarded, 100,
+            "レベル倍率は消去時点の値 (§9.2)"
+        );
+        assert_eq!(game.level(), 2);
+    }
+
+    #[test]
+    fn shift_rotate_and_soft_drop_events() {
+        let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(right()); // f1: 移動成功
+        assert!(game.events().shifted);
+        assert!(!game.events().rotated);
+        game.update(cw()); // f2: 回転成功
+        assert!(game.events().rotated);
+        assert!(!game.events().shifted);
+        run(&mut game, down(), 2); // f3-4: アキュムレータ充填中
+        assert_eq!(game.events().soft_drop_rows, 0);
+        game.update(down()); // f5: 1 セル落下
+        assert_eq!(game.events().soft_drop_rows, 1);
+        assert_eq!(game.events().locked, None);
+    }
+
+    #[test]
+    fn failed_shift_does_not_report_event() {
+        let mut game = game();
+        run(&mut game, left(), 13); // f1-13: 左壁 (x=0) 到達
+        assert_eq!(active(&game).x, 0);
+        run(&mut game, left(), 2); // f14-15: ARR 周期でも壁で移動失敗
+        assert!(!game.events().shifted);
+    }
+
+    #[test]
+    fn paused_frames_report_no_events() {
+        let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(start()); // f1: ポーズ
+        assert_eq!(game.phase(), Phase::Paused);
+        assert_eq!(*game.events(), FrameEvents::default());
+        let chaos = Buttons {
+            left: true,
+            down: true,
+            up: true,
+            rotate_cw: true,
+            hold: true,
+            ..Buttons::default()
+        };
+        run(&mut game, chaos, 10); // f2-11: ポーズ中はイベントなし
+        assert_eq!(*game.events(), FrameEvents::default());
+    }
+
+    #[test]
+    fn block_out_sets_topped_out_with_lock_event() {
+        let mut game = game();
+        game.board.set(3, 21, Some(Tetromino::J));
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(up()); // f1: T ロック → 次の Z がブロックアウト (§13)
+        let events = game.events();
+        assert!(events.topped_out);
+        assert!(events.hard_dropped);
+        assert!(
+            events.locked.is_some(),
+            "ロック自体は成立しスコア処理まで走る"
+        );
+        game.update(idle()); // f2: ゲームオーバー後はイベントなし
+        assert_eq!(*game.events(), FrameEvents::default());
+    }
+
+    #[test]
+    fn lock_out_reports_topped_out_without_lock_event() {
+        let mut game = game();
+        game.board.set(4, 19, Some(Tetromino::J));
+        game.update(idle()); // f0: 初回エッジ飲み込み
+        game.update(hold()); // f1: Z が y=19 で接地
+        game.update(up()); // f2: 全セル可視領域外でロック → ロックアウト (§13)
+        assert_eq!(game.phase(), Phase::GameOver);
+        let events = game.events();
+        assert!(events.topped_out);
+        assert!(events.hard_dropped);
+        assert_eq!(
+            events.locked, None,
+            "ロックアウトでは加点・消去処理は走らない"
+        );
     }
 
     // ---- 描画用アクセサ (§14.2-8) ----
