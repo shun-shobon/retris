@@ -58,6 +58,8 @@ pub struct Game {
     scoring: Scoring,
     das: Das,
     prev_buttons: Buttons,
+    /// 次の [`Self::update`] が初回か。初回はエッジの飲み込みを行う (§12.3)。
+    first_update: bool,
     /// 最後に成功した操作が回転か (§10.1-2)。
     last_action_was_rotation: bool,
     /// 最後の回転で成立したキックテスト番号 1〜5 (§10.3 のキック 5 例外用)。
@@ -69,7 +71,12 @@ impl Game {
     /// シードと開始レベル (1〜15、§11) から新規ゲームを生成する。
     ///
     /// ネクストキューを生成し、最初のミノを §3.2 の手順でスポーンする。
-    /// 初回 `update` の前フレーム状態は「全ボタン非押下」として扱う。
+    ///
+    /// 初回 `update` は渡されたボタン状態をそのまま「前フレーム状態」として扱う
+    /// (エッジの飲み込み)。タイトル画面から押しっぱなしの START / 上 / ホールド /
+    /// 回転はエッジ発火せず、押し直しが必要 (§12.3 の誤爆防止)。左右・下の保持系は
+    /// 初回から有効で、押しっぱなしの左右は初回フレームで新規押下として扱われる
+    /// (1 セル移動 + DAS チャージ 0 から)。重力等の時間進行は初回から通常どおり。
     #[must_use]
     pub fn new(seed: u32, start_level: u32) -> Self {
         let mut queue = PieceQueue::new(seed);
@@ -88,6 +95,7 @@ impl Game {
                 timer: DAS_FRAMES,
             },
             prev_buttons: Buttons::default(),
+            first_update: true,
             last_action_was_rotation: false,
             last_kick: 0,
             phase: Phase::Playing,
@@ -108,11 +116,23 @@ impl Game {
     ///
     /// PAUSED 中は START エッジ検出以外なにも進めない (§14.3)。
     /// GAME OVER 後は何もしない (§14.4)。
+    ///
+    /// 初回呼び出しは「エッジの飲み込み」を行う: 渡された `buttons` をそのまま
+    /// 前フレーム状態とみなし、押しっぱなしのボタンをエッジと誤検出しない
+    /// (詳細は [`Self::new`] のドキュメント)。
     pub fn update(&mut self, buttons: Buttons) {
         if matches!(self.phase, Phase::GameOver) {
             return;
         }
-        let prev = core::mem::replace(&mut self.prev_buttons, buttons);
+        // (1) エッジ検出の基準となる前フレーム状態。初回はタイトル画面などから
+        // 持ち越された押しっぱなしをエッジ発火させないため buttons 自身を使う。
+        let prev = if self.first_update {
+            self.first_update = false;
+            buttons
+        } else {
+            self.prev_buttons
+        };
+        self.prev_buttons = buttons;
 
         // (2) ポーズ往復 (§14.3)。エッジのフレーム自体は他の処理を進めない。
         if buttons.start && !prev.start {
@@ -504,6 +524,87 @@ mod tests {
         assert_eq!(Game::new(SEED, 5).level(), 5);
     }
 
+    // ---- ゲーム開始フレームのエッジ飲み込み (§12.3, §14.3) ----
+
+    #[test]
+    fn first_update_ignores_held_start() {
+        let mut game = game();
+        game.update(start()); // f1: タイトル画面から持ち越した START
+        assert_eq!(
+            game.phase(),
+            Phase::Playing,
+            "初回フレームの押しっぱなし START でポーズしない"
+        );
+        game.update(idle()); // f2: 離す
+        game.update(start()); // f3: 押し直しで発火
+        assert_eq!(game.phase(), Phase::Paused);
+    }
+
+    #[test]
+    fn first_update_ignores_held_hard_drop() {
+        let mut game = game();
+        game.update(up()); // f1: 押しっぱなしの上キー (§12.3)
+        assert_eq!(active(&game).kind, Tetromino::T, "初回フレームでは無視");
+        assert_eq!(game.score(), 0);
+        game.update(idle()); // f2: 離す
+        game.update(up()); // f3: 押し直しで 19 セルのハードドロップ
+        assert_eq!(active(&game).kind, Tetromino::Z);
+        assert_eq!(game.score(), 38);
+    }
+
+    #[test]
+    fn first_update_ignores_held_hold() {
+        let mut game = game();
+        game.update(hold()); // f1
+        assert_eq!(game.hold_piece(), None, "初回フレームでは無視");
+        assert_eq!(active(&game).kind, Tetromino::T);
+        game.update(idle()); // f2: 離す
+        game.update(hold()); // f3: 押し直しで発火
+        assert_eq!(game.hold_piece(), Some(Tetromino::T));
+        assert_eq!(active(&game).kind, Tetromino::Z);
+    }
+
+    #[test]
+    fn first_update_ignores_held_rotation() {
+        let mut game = game();
+        game.update(cw()); // f1
+        assert_eq!(active(&game).rot, Rotation::Spawn, "初回フレームでは無視");
+        game.update(idle()); // f2: 離す
+        game.update(cw()); // f3: 押し直しで発火
+        assert_eq!(active(&game).rot, Rotation::Cw);
+    }
+
+    #[test]
+    fn held_buttons_from_first_update_do_not_fire_later() {
+        let mut game = game();
+        let held = Buttons {
+            up: true,
+            hold: true,
+            start: true,
+            rotate_cw: true,
+            ..Buttons::default()
+        };
+        run(&mut game, held, 5); // f1-5: 保持継続中はエッジが立たない
+        assert_eq!(game.phase(), Phase::Playing);
+        assert_eq!(game.hold_piece(), None);
+        assert_eq!(active(&game).kind, Tetromino::T);
+        assert_eq!(active(&game).rot, Rotation::Spawn);
+        assert_eq!(game.score(), 0);
+    }
+
+    #[test]
+    fn first_update_held_direction_acts_as_fresh_press() {
+        // 保持系の左右移動は初回フレームから有効: 押しっぱなしを「このフレームで
+        // 押下された」ものとして扱い、1 セル移動 + DAS チャージは 0 から。
+        let mut game = game();
+        game.update(right()); // f1: 即 1 セル
+        assert_eq!(active(&game).x, 4);
+        run(&mut game, right(), 9); // f2-10: DAS 充填中
+        assert_eq!(active(&game).x, 4);
+        game.update(right()); // f11: DAS 満了で 2 セル目
+        assert_eq!(active(&game).x, 5);
+    }
+
     // ---- DAS / ARR (§12.2) ----
 
     #[test]
@@ -624,6 +725,7 @@ mod tests {
     #[test]
     fn rotation_fires_once_per_press_edge() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(cw()); // f1: エッジで 1 回
         assert_eq!(active(&game).rot, Rotation::Cw);
         game.update(cw()); // f2: 保持継続では回らない
@@ -636,6 +738,7 @@ mod tests {
     #[test]
     fn rotation_flag_set_and_cleared_by_move_and_fall() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(cw()); // f1: 回転成功
         assert!(game.last_action_was_rotation);
         game.update(right()); // f2: 移動成功でフラグ解除 (§10.1-2)
@@ -666,6 +769,7 @@ mod tests {
     #[test]
     fn o_rotation_input_changes_nothing() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up()); // f1: T ロック → Z
         game.update(idle()); // f2
         game.update(up()); // f3: Z ロック → O
@@ -706,6 +810,7 @@ mod tests {
     #[test]
     fn hard_drop_locks_immediately_and_scores_2_per_cell() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up()); // f1: y=18 → -1 の 19 セル
         assert_eq!(game.score(), 38);
         for (x, y) in [(3, 0), (4, 0), (5, 0), (4, 1)] {
@@ -719,6 +824,7 @@ mod tests {
     #[test]
     fn hard_drop_requires_new_press_for_next_piece() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up()); // f1: T ロック → Z
         game.update(up()); // f2: 押しっぱなしでは発動しない (§12.3)
         assert_eq!(active(&game).kind, Tetromino::Z);
@@ -764,6 +870,7 @@ mod tests {
     #[test]
     fn first_hold_stores_piece_and_spawns_from_queue() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(hold()); // f1
         assert_eq!(game.hold_piece(), Some(Tetromino::T));
         let piece = active(&game);
@@ -774,6 +881,7 @@ mod tests {
     #[test]
     fn hold_is_ignored_until_next_lock() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(hold()); // f1: T → ホールド、Z スポーン
         game.update(idle()); // f2
         game.update(hold()); // f3: ロック前の再ホールドは無視 (§6.2)
@@ -784,6 +892,7 @@ mod tests {
     #[test]
     fn hold_swaps_after_lock() {
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(hold()); // f1: hold=T、Z スポーン
         game.update(idle()); // f2
         game.update(up()); // f3: Z ロック → hold_used 解除、O スポーン
@@ -846,6 +955,7 @@ mod tests {
         for x in [0, 1, 2, 6, 7, 8, 9] {
             game.board.set(x, 0, Some(Tetromino::L));
         }
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up()); // T が x=3..5 を埋めて Single
         // ハードドロップ 19 セル × 2 点 + Single 100 × level 2 (§9.2, §9.5)。
         assert_eq!(game.score(), 38 + 200);
@@ -862,6 +972,7 @@ mod tests {
     fn block_out_on_spawn_is_game_over() {
         let mut game = game();
         game.board.set(3, 21, Some(Tetromino::J)); // 次の Z のスポーンセル (§3.1)
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up()); // T ロック → Z のスポーンが重なる
         assert_eq!(game.phase(), Phase::GameOver);
         assert_eq!(game.active_piece(), None);
@@ -872,6 +983,7 @@ mod tests {
     fn block_out_on_hold_spawn_is_game_over() {
         let mut game = game();
         game.board.set(3, 21, Some(Tetromino::J));
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(hold()); // ホールド由来の Z スポーンでもブロックアウト (§6.2)
         assert_eq!(game.phase(), Phase::GameOver);
     }
@@ -880,6 +992,7 @@ mod tests {
     fn lock_out_fully_above_visible_area_is_game_over() {
         let mut game = game();
         game.board.set(4, 19, Some(Tetromino::J)); // Z のスポーン直後落下を塞ぐ
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(hold()); // f1: Z が (3,19) のまま接地 (全セル y>=20)
         assert_eq!(active(&game).y, 19);
         game.update(up()); // f2: 0 セルハードドロップでロック → ロックアウト
@@ -890,6 +1003,7 @@ mod tests {
     fn game_over_updates_are_inert() {
         let mut game = game();
         game.board.set(3, 21, Some(Tetromino::J));
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up());
         assert_eq!(game.phase(), Phase::GameOver);
         let score = game.score();
@@ -994,6 +1108,7 @@ mod tests {
     fn next_previews_advance_after_lock() {
         use Tetromino::{I, J, L, O, S};
         let mut game = game();
+        game.update(idle()); // f0: 初回エッジ飲み込み
         game.update(up()); // T ロック → Z が操作中に
         let next: [Tetromino; 5] = core::array::from_fn(|i| game.next(i));
         assert_eq!(next, [O, J, S, L, I]);
