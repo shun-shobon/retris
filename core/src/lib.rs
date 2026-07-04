@@ -9,7 +9,9 @@
 pub mod active;
 pub mod board;
 pub mod piece;
+pub mod srs;
 
 pub use active::ActivePiece;
 pub use board::{Board, FIELD_HEIGHT, FIELD_WIDTH, VISIBLE_HEIGHT};
 pub use piece::{Rotation, Tetromino};
+pub use srs::{RotateDir, RotateOutcome, try_rotate};
