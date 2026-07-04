@@ -96,6 +96,12 @@ static PALETTES: [Palette16; 8] = [
     block_palette(PIECE_COLOURS[6]),
 ];
 
+/// 背景パレット一式 ([`PALETTES`]) を登録する。全画面 (フィールド・HUD・タイトル)
+/// で共有するため、起動時に一度だけ呼ぶこと。
+pub(crate) fn init_palettes(gfx: &mut Graphics<'_>) {
+    gfx.set_background_palettes(&PALETTES);
+}
+
 /// ミノ種別 → 背景パレット番号 (1..=7)。
 const fn palette_of(kind: Tetromino) -> u8 {
     match kind {
@@ -144,10 +150,10 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// パレット登録・タイル生成・静的部分 (壁と空フィールド) の初期描画を行う。
-    pub fn new(gfx: &mut Graphics<'_>) -> Self {
-        gfx.set_background_palettes(&PALETTES);
-
+    /// タイル生成と静的部分 (壁と空フィールド) の初期描画を行う。
+    ///
+    /// パレットは [`init_palettes`] で登録済みであること。
+    pub fn new() -> Self {
         let mut bg = RegularBackground::new(
             Priority::P0,
             RegularBackgroundSize::Background32x32,
@@ -219,6 +225,25 @@ impl Renderer {
                     }
                 };
                 self.drawn[y][x] = cell;
+            }
+        }
+    }
+
+    /// 盤面全体をグレー (壁と同じパレット 0) で塗り直す。ゲームオーバー演出用 (§14.4)。
+    ///
+    /// 以後 [`Self::render`] を呼ばないこと (差分キャッシュとずれるため)。
+    /// 呼ぶ場面はシーン遷移で作り直すまでの静止表示に限る。
+    pub fn greyout(&mut self, game: &Game) {
+        for y in 0..VISIBLE_HEIGHT {
+            for x in 0..FIELD_WIDTH {
+                let pos = (FIELD_ORIGIN_TX + x as i32, (VISIBLE_HEIGHT - 1 - y) as i32);
+                if game.board().get(x as i8, y as i8).is_some() {
+                    self.bg
+                        .set_tile_dynamic16(pos, &self.block_tile, ui_effect());
+                } else {
+                    self.bg
+                        .set_tile_dynamic16(pos, &self.empty_tile, ui_effect());
+                }
             }
         }
     }

@@ -1,16 +1,20 @@
 //! 右側 HUD: スコア・レベル・消去ライン・ネクスト 5・ホールド (+B2B/コンボ表示)。
 //!
 //! プレイフィールドとは別の背景レイヤ 1 枚に描く。ラベルと数字は自作 5×7 ピクセル
-//! フォント (コード生成の [`DynamicTile16`])、ミノプレビューはフィールドと同じ
-//! ブロックタイル+パレット切替。値が変化したフレームだけタイルを更新する。
+//! フォント ([`crate::font::Font`])、ミノプレビューはフィールドと同じブロック
+//! タイル+パレット切替。値が変化したフレームだけタイルを更新する。
+//!
+//! フィールド上のオーバーレイ (PAUSE / GAME OVER) もこのレイヤに描く
+//! (フィールド領域 x2..=11 は HUD レイヤでは透過のため文字だけが重なる)。
 
 use agb::display::{
     GraphicsFrame, Priority,
     tiled::{DynamicTile16, RegularBackground, RegularBackgroundSize, TileFormat},
 };
-use retris_core::{Game, LockEvent, NEXT_COUNT, Rotation, Tetromino};
+use retris_core::{Game, LockEvent, NEXT_COUNT, Phase, Rotation, Tetromino};
 
-use crate::render::{IDX_TEXT, make_block_tile, piece_effect, ui_effect};
+use crate::font::Font;
+use crate::render::{make_block_tile, piece_effect, ui_effect};
 
 // ---- レイアウト (タイル座標)。フィールドは x1..=12、HUD は x14 以降 ----
 
@@ -45,91 +49,8 @@ const NEXT_LABEL_Y: i32 = 0;
 const NEXT_SLOT_Y0: i32 = 2;
 const NEXT_SLOT_PITCH: i32 = 3;
 
-// ---- 5×7 ピクセルフォント ----
-
-/// 収録グリフ (この順で `GLYPH_BITMAPS` と対応)。先頭 10 個は数字 0..=9。
-const GLYPH_CHARS: &[u8; 24] = b"0123456789BCDEHILNORSTVX";
-
-/// 5×7 ビットマップ。各行の bit4 が左端ピクセル。8 行目 (最下行) は空き。
-const GLYPH_BITMAPS: [[u8; 7]; 24] = [
-    [
-        0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
-    ], // 0
-    [
-        0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-    ], // 1
-    [
-        0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
-    ], // 2
-    [
-        0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
-    ], // 3
-    [
-        0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
-    ], // 4
-    [
-        0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110,
-    ], // 5
-    [
-        0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
-    ], // 6
-    [
-        0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
-    ], // 7
-    [
-        0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
-    ], // 8
-    [
-        0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100,
-    ], // 9
-    [
-        0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
-    ], // B
-    [
-        0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
-    ], // C
-    [
-        0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
-    ], // D
-    [
-        0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
-    ], // E
-    [
-        0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
-    ], // H
-    [
-        0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
-    ], // I
-    [
-        0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
-    ], // L
-    [
-        0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001,
-    ], // N
-    [
-        0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
-    ], // O
-    [
-        0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
-    ], // R
-    [
-        0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
-    ], // S
-    [
-        0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-    ], // T
-    [
-        0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100,
-    ], // V
-    [
-        0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001,
-    ], // X
-];
-
-/// グリフ文字 → `GLYPH_BITMAPS` の添字。
-fn glyph_index(c: u8) -> Option<usize> {
-    GLYPH_CHARS.iter().position(|&g| g == c)
-}
+/// フィールド上オーバーレイの行 (フィールド中央付近)。
+const OVERLAY_Y: i32 = 9;
 
 /// 前フレームに描画した HUD の値。変化検出用。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -156,12 +77,9 @@ impl Snapshot {
 /// HUD の描画状態。
 pub struct Hud {
     bg: RegularBackground,
-    /// 5×7 フォント (順序は [`GLYPH_CHARS`])。
-    glyphs: [DynamicTile16; GLYPH_CHARS.len()],
+    font: Font,
     /// ミノプレビュー・ホールド枠用のブロック。
     block_tile: DynamicTile16,
-    /// 全透過タイル (桁・スロットのクリア用)。
-    blank_tile: DynamicTile16,
     /// 前フレームに描画した値。`None` なら未描画 (初回に全描画)。
     drawn: Option<Snapshot>,
     /// B2B/コンボ演出行の残り表示フレーム数。
@@ -171,8 +89,7 @@ pub struct Hud {
 impl Hud {
     /// タイル生成とラベル・ホールド枠の初期描画を行う。
     ///
-    /// パレットは [`crate::render::Renderer::new`] が登録するものを共有するため、
-    /// 先に `Renderer::new` を呼んでおくこと。
+    /// パレットは [`crate::render::init_palettes`] で登録済みであること。
     pub fn new() -> Self {
         let bg = RegularBackground::new(
             Priority::P0,
@@ -180,24 +97,19 @@ impl Hud {
             TileFormat::FourBpp,
         );
 
-        let glyphs = core::array::from_fn(|i| make_glyph_tile(&GLYPH_BITMAPS[i]));
-        let block_tile = make_block_tile();
-        let blank_tile = DynamicTile16::new().fill_with(0);
-
         let mut hud = Self {
             bg,
-            glyphs,
-            block_tile,
-            blank_tile,
+            font: Font::new(),
+            block_tile: make_block_tile(),
             drawn: None,
             fx_timer: 0,
         };
 
-        hud.draw_text(HUD_X, HOLD_LABEL_Y, b"HOLD");
-        hud.draw_text(HUD_X, SCORE_LABEL_Y, b"SCORE");
-        hud.draw_text(HUD_X, LEVEL_LABEL_Y, b"LEVEL");
-        hud.draw_text(HUD_X, LINES_LABEL_Y, b"LINES");
-        hud.draw_text(NEXT_X, NEXT_LABEL_Y, b"NEXT");
+        hud.write(HUD_X, HOLD_LABEL_Y, b"HOLD");
+        hud.write(HUD_X, SCORE_LABEL_Y, b"SCORE");
+        hud.write(HUD_X, LEVEL_LABEL_Y, b"LEVEL");
+        hud.write(HUD_X, LINES_LABEL_Y, b"LINES");
+        hud.write(NEXT_X, NEXT_LABEL_Y, b"NEXT");
         hud.draw_hold_frame();
         hud
     }
@@ -214,13 +126,16 @@ impl Hud {
             |get: fn(&Snapshot) -> u32| force || prev.is_some_and(|p| get(&p) != get(&snapshot));
 
         if changed(|s| s.score) {
-            self.draw_number(HUD_X, SCORE_Y, SCORE_DIGITS, snapshot.score);
+            self.font
+                .write_number(&mut self.bg, HUD_X, SCORE_Y, SCORE_DIGITS, snapshot.score);
         }
         if changed(|s| s.level) {
-            self.draw_number(HUD_X, LEVEL_Y, LEVEL_DIGITS, snapshot.level);
+            self.font
+                .write_number(&mut self.bg, HUD_X, LEVEL_Y, LEVEL_DIGITS, snapshot.level);
         }
         if changed(|s| s.lines) {
-            self.draw_number(HUD_X, LINES_Y, LINES_DIGITS, snapshot.lines);
+            self.font
+                .write_number(&mut self.bg, HUD_X, LINES_Y, LINES_DIGITS, snapshot.lines);
         }
         if force || prev.is_some_and(|p| p.hold != snapshot.hold) {
             self.draw_preview(HUD_X + 1, HOLD_FRAME_Y + 1, snapshot.hold);
@@ -237,9 +152,10 @@ impl Hud {
         self.drawn = Some(snapshot);
 
         // B2B / コンボ演出 (§9.3, §9.4): ロックしたフレームだけイベントが立つ。
+        // ポーズ中はタイマーも停止する (§14.3)。
         if let Some(lock) = game.events().locked {
             self.draw_lock_fx(&lock);
-        } else if self.fx_timer > 0 {
+        } else if self.fx_timer > 0 && !matches!(game.phase(), Phase::Paused) {
             self.fx_timer -= 1;
             if self.fx_timer == 0 {
                 self.clear_lock_fx();
@@ -252,18 +168,30 @@ impl Hud {
         self.bg.show(frame);
     }
 
+    /// フィールド中央の「PAUSE」表示を出す/消す (§14.3)。
+    pub fn set_pause_overlay(&mut self, shown: bool) {
+        let text: &[u8] = if shown { b"PAUSE" } else { b"     " };
+        self.write(4, OVERLAY_Y, text);
+    }
+
+    /// フィールド中央に「GAME OVER」を表示する (§14.4)。
+    pub fn draw_game_over_overlay(&mut self) {
+        self.write(2, OVERLAY_Y, b"GAME OVER");
+    }
+
     /// ロック演出行を更新する。B2B・コンボ (1 以上) のどちらも無ければ消す。
     fn draw_lock_fx(&mut self, lock: &LockEvent) {
         if lock.b2b_applied {
-            self.draw_text(HUD_X, FX_B2B_Y, b"B2B");
+            self.write(HUD_X, FX_B2B_Y, b"B2B");
         } else {
-            self.draw_text(HUD_X, FX_B2B_Y, b"   ");
+            self.write(HUD_X, FX_B2B_Y, b"   ");
         }
         if lock.combo >= 1 {
-            self.draw_text(HUD_X, FX_COMBO_Y, b"C");
-            self.draw_number(HUD_X + 1, FX_COMBO_Y, 2, lock.combo as u32);
+            self.write(HUD_X, FX_COMBO_Y, b"C");
+            self.font
+                .write_number(&mut self.bg, HUD_X + 1, FX_COMBO_Y, 2, lock.combo as u32);
         } else {
-            self.draw_text(HUD_X, FX_COMBO_Y, b"   ");
+            self.write(HUD_X, FX_COMBO_Y, b"   ");
         }
         self.fx_timer = if lock.b2b_applied || lock.combo >= 1 {
             FX_FRAMES
@@ -274,8 +202,13 @@ impl Hud {
 
     /// ロック演出行を消す。
     fn clear_lock_fx(&mut self) {
-        self.draw_text(HUD_X, FX_B2B_Y, b"   ");
-        self.draw_text(HUD_X, FX_COMBO_Y, b"   ");
+        self.write(HUD_X, FX_B2B_Y, b"   ");
+        self.write(HUD_X, FX_COMBO_Y, b"   ");
+    }
+
+    /// [`Font::write`] の self.bg 束縛ショートカット。
+    fn write(&mut self, x: i32, y: i32, text: &[u8]) {
+        self.font.write(&mut self.bg, x, y, text);
     }
 
     /// ホールド枠 (6×4 の縁) をブロックタイルで描く。
@@ -301,7 +234,7 @@ impl Hud {
         for dy in 0..2 {
             for dx in 0..4 {
                 self.bg
-                    .set_tile_dynamic16((x0 + dx, y0 + dy), &self.blank_tile, ui_effect());
+                    .set_tile_dynamic16((x0 + dx, y0 + dy), self.font.blank(), ui_effect());
             }
         }
         let Some(kind) = piece else { return };
@@ -322,50 +255,4 @@ impl Hud {
                 .set_tile_dynamic16(pos, &self.block_tile, piece_effect(kind));
         }
     }
-
-    /// 右詰め・先頭空白の 10 進数を描く。`width` 桁を超える値は 9 埋めで飽和。
-    fn draw_number(&mut self, x: i32, y: i32, width: u32, value: u32) {
-        let max = 10u32.pow(width) - 1;
-        let mut rest = value.min(max);
-        for i in 0..width {
-            let pos = (x + (width - 1 - i) as i32, y);
-            if i == 0 || rest > 0 {
-                let digit = (rest % 10) as usize;
-                self.bg
-                    .set_tile_dynamic16(pos, &self.glyphs[digit], ui_effect());
-                rest /= 10;
-            } else {
-                self.bg
-                    .set_tile_dynamic16(pos, &self.blank_tile, ui_effect());
-            }
-        }
-    }
-
-    /// グリフ文字列を描く。空白と未収録文字は透過タイルになる。
-    fn draw_text(&mut self, x: i32, y: i32, text: &[u8]) {
-        for (i, &c) in text.iter().enumerate() {
-            let pos = (x + i as i32, y);
-            match glyph_index(c) {
-                Some(g) => self
-                    .bg
-                    .set_tile_dynamic16(pos, &self.glyphs[g], ui_effect()),
-                None => self
-                    .bg
-                    .set_tile_dynamic16(pos, &self.blank_tile, ui_effect()),
-            };
-        }
-    }
-}
-
-/// 5×7 ビットマップからテキストタイルを生成する (背景は透過)。
-fn make_glyph_tile(bitmap: &[u8; 7]) -> DynamicTile16 {
-    let mut tile = DynamicTile16::new().fill_with(0);
-    for (y, &row) in bitmap.iter().enumerate() {
-        for x in 0..5 {
-            if row & (1 << (4 - x)) != 0 {
-                tile.set_pixel(x, y, IDX_TEXT);
-            }
-        }
-    }
-    tile
 }
