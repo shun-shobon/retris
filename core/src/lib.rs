@@ -9,6 +9,7 @@
 pub mod active;
 pub mod bag;
 pub mod board;
+pub mod physics;
 pub mod piece;
 pub mod rng;
 pub mod srs;
@@ -16,6 +17,9 @@ pub mod srs;
 pub use active::ActivePiece;
 pub use bag::{NEXT_COUNT, PieceQueue};
 pub use board::{Board, FIELD_HEIGHT, FIELD_WIDTH, VISIBLE_HEIGHT};
+pub use physics::{
+    GravityAccumulator, SOFT_DROP_FACTOR, ghost, gravity_q16, is_grounded, try_fall, try_shift,
+};
 pub use piece::{Rotation, Tetromino};
 pub use rng::Rng;
 pub use srs::{RotateDir, RotateOutcome, try_rotate};
