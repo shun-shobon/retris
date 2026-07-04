@@ -1,0 +1,5 @@
+target/
+/tools/
+*.gba
+.claude/
+.DS_Store
