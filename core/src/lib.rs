@@ -1,22 +1,15 @@
 //! retris-core: テトリスガイドライン準拠のゲームロジック (`no_std`)。
 //!
 //! GBAバイナリ (`gba/`) から利用される。ホスト上で `cargo test` 可能。
+//!
+//! 座標系 (仕様書 §1.1): x は左端 0・右端 9 (右が正)、y は最下行 0・最上行 39 (上が正)。
 
 #![cfg_attr(not(test), no_std)]
 
-/// 盤面の幅(セル数)。
-pub const BOARD_WIDTH: usize = 10;
+pub mod active;
+pub mod board;
+pub mod piece;
 
-/// 盤面の可視領域の高さ(セル数)。
-pub const BOARD_HEIGHT: usize = 20;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn board_dimensions() {
-        assert_eq!(BOARD_WIDTH, 10);
-        assert_eq!(BOARD_HEIGHT, 20);
-    }
-}
+pub use active::ActivePiece;
+pub use board::{Board, FIELD_HEIGHT, FIELD_WIDTH, VISIBLE_HEIGHT};
+pub use piece::{Rotation, Tetromino};
