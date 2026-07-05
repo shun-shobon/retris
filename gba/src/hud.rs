@@ -1,22 +1,27 @@
 //! HUD: スコア・レベル・消去ライン・ネクスト 5・ホールド (+B2B/コンボ表示)。
 //!
-//! プレイフィールドとは別の背景レイヤ 1 枚に描く。ラベルと数字は自作 5×7 ピクセル
-//! フォント ([`crate::font::Font`])、ミノプレビューはフィールドと同じブロック
-//! タイル+パレット切替。値が変化したフレームだけタイルを更新する。
+//! ラベルと数字はプレイフィールドとは別の背景レイヤ 1 枚に自作 5×7 ピクセル
+//! フォント ([`crate::font::Font`]) で描き、値が変化したフレームだけ更新する。
+//! ミノプレビュー (ネクスト 5+ホールド) は 32×16 の動的スプライト (OAM) で、
+//! ミノ形状をスプライト内にピクセル単位でセンタリングして置く (タイルマップ
+//! では 3 セル幅ミノの半タイル中央合わせができないため)。
 //!
-//! フィールド上のオーバーレイ (PAUSE / GAME OVER) もこのレイヤに描く。
+//! フィールド上のオーバーレイ (PAUSE / GAME OVER) は HUD レイヤに描く。
 //! HUD は [`Priority::P0`]、フィールドは `Priority::P1` のため HUD が常に手前に
 //! 出る。フィールド領域 x10..=19 は HUD レイヤでは通常透過で、オーバーレイの
 //! 文字タイルだけがフィールドに重なって見える。
 
 use agb::display::{
     GraphicsFrame, Priority,
+    object::{DynamicSprite16, Object, Size, SpriteVram},
     tiled::{DynamicTile16, RegularBackground, RegularBackgroundSize, TileFormat},
 };
 use retris_core::{Game, LockEvent, NEXT_COUNT, Phase, Rotation, Tetromino};
 
 use crate::font::Font;
-use crate::render::{FIELD_ORIGIN_TX, make_block_tile, piece_effect, ui_effect};
+use crate::render::{
+    FIELD_ORIGIN_TX, draw_block_bevel, make_block_tile, obj_piece_palette, ui_effect,
+};
 
 // ---- レイアウト (タイル座標)。フィールドは中央 x9..=20、HUD はその左右 ----
 
@@ -45,13 +50,23 @@ const FX_COMBO_Y: i32 = 16;
 /// 演出行の表示フレーム数 (約 2 秒)。
 const FX_FRAMES: u8 = 120;
 
-/// 左カラム (ネクスト) の左端。プレビューは 4×2 セル。
+/// 左カラム (ネクスト) のラベル左端。
 /// 左サイド x0..=8 のうち、左壁 (x=9) との間に余白が残るよう左寄り。
 const NEXT_X: i32 = 2;
 const NEXT_LABEL_Y: i32 = 0;
-/// ネクスト i 番目のスロット上端 = `NEXT_SLOT_Y0 + i * NEXT_SLOT_PITCH`。
+/// ネクスト i 番目のスロット上端 (タイル) = `NEXT_SLOT_Y0 + i * NEXT_SLOT_PITCH`。
 const NEXT_SLOT_Y0: i32 = 2;
 const NEXT_SLOT_PITCH: i32 = 3;
+
+// ---- ミノプレビューのスプライト配置 (ピクセル座標) ----
+
+/// プレビュースプライトの幅 (I ミノ 4 セルがちょうど収まる)。
+const PREVIEW_W: i32 = 32;
+/// ネクストスロットのスプライト左上 x。左サイド x0..=8 (72px) の水平中央。
+const NEXT_SPRITE_X: i32 = (9 * 8 - PREVIEW_W) / 2;
+/// ホールドプレビューのスプライト左上。枠 (6×4 タイル) の内側 4×2 セルと一致。
+const HOLD_SPRITE_X: i32 = (HUD_X + 1) * 8;
+const HOLD_SPRITE_Y: i32 = (HOLD_FRAME_Y + 1) * 8;
 
 /// フィールド上オーバーレイの行 (フィールド中央付近)。
 const OVERLAY_Y: i32 = 9;
@@ -86,8 +101,14 @@ impl Snapshot {
 pub struct Hud {
     bg: RegularBackground,
     font: Font,
-    /// ミノプレビュー・ホールド枠用のブロック。
+    /// ホールド枠用のブロック。
     block_tile: DynamicTile16,
+    /// 種別ごとのプレビュースプライト (遅延生成して全スロットで使い回す)。
+    previews: PreviewSprites,
+    /// ホールドのプレビュー (未ホールドなら `None`)。
+    hold_obj: Option<Object>,
+    /// ネクスト 5 スロットのプレビュー (`None` は初回描画前のみ)。
+    next_objs: [Option<Object>; NEXT_COUNT],
     /// 前フレームに描画した値。`None` なら未描画 (初回に全描画)。
     drawn: Option<Snapshot>,
     /// B2B/コンボ演出行の残り表示フレーム数。
@@ -109,6 +130,9 @@ impl Hud {
             bg,
             font: Font::new(),
             block_tile: make_block_tile(),
+            previews: PreviewSprites::default(),
+            hold_obj: None,
+            next_objs: Default::default(),
             drawn: None,
             fx_timer: 0,
         };
@@ -146,15 +170,21 @@ impl Hud {
                 .write_number(&mut self.bg, HUD_X, LINES_Y, LINES_DIGITS, snapshot.lines);
         }
         if force || prev.is_some_and(|p| p.hold != snapshot.hold) {
-            self.draw_preview(HUD_X + 1, HOLD_FRAME_Y + 1, snapshot.hold);
+            self.hold_obj = snapshot.hold.map(|kind| {
+                let mut obj = Object::new(self.previews.get(kind));
+                obj.set_pos((HOLD_SPRITE_X, HOLD_SPRITE_Y));
+                obj
+            });
         }
-        if force || prev.is_some_and(|p| p.next != snapshot.next) {
-            for (i, &kind) in snapshot.next.iter().enumerate() {
-                self.draw_preview(
-                    NEXT_X,
-                    NEXT_SLOT_Y0 + i as i32 * NEXT_SLOT_PITCH,
-                    Some(kind),
-                );
+        for (i, &kind) in snapshot.next.iter().enumerate() {
+            // ミノ種別が変わったスロットだけスプライトを差し替える。
+            if force || prev.is_some_and(|p| p.next[i] != kind) {
+                let mut obj = Object::new(self.previews.get(kind));
+                obj.set_pos((
+                    NEXT_SPRITE_X,
+                    (NEXT_SLOT_Y0 + i as i32 * NEXT_SLOT_PITCH) * 8,
+                ));
+                self.next_objs[i] = Some(obj);
             }
         }
         self.drawn = Some(snapshot);
@@ -171,9 +201,18 @@ impl Hud {
         }
     }
 
-    /// このフレームに HUD レイヤを表示する。
+    /// このフレームに HUD レイヤとプレビュースプライトを表示する。
+    ///
+    /// OAM は毎フレーム `show` したものだけが表示される (agb の仕様) ため、
+    /// シーン遷移でこの呼び出しが無くなればスプライトも自動的に消える。
     pub fn show(&self, frame: &mut GraphicsFrame<'_>) {
         self.bg.show(frame);
+        if let Some(obj) = &self.hold_obj {
+            obj.show(frame);
+        }
+        for obj in self.next_objs.iter().flatten() {
+            obj.show(frame);
+        }
     }
 
     /// フィールド中央の「PAUSE」表示を出す/消す (§14.3)。
@@ -234,33 +273,47 @@ impl Hud {
         }
     }
 
-    /// 4×2 セルのスロットにミノプレビューを描く (`None` なら空にする)。
-    ///
-    /// スポーン向き ([`Rotation::Spawn`]) の形をボックス座標から正規化し、
-    /// スロット内で中央寄せする。
-    fn draw_preview(&mut self, x0: i32, y0: i32, piece: Option<Tetromino>) {
-        for dy in 0..2 {
-            for dx in 0..4 {
-                self.bg
-                    .set_tile_dynamic16((x0 + dx, y0 + dy), self.font.blank(), ui_effect());
-            }
-        }
-        let Some(kind) = piece else { return };
+}
 
-        let cells = kind.cells(Rotation::Spawn);
-        let min_cx = cells.iter().map(|&(cx, _)| cx).min().unwrap_or(0);
-        let max_cx = cells.iter().map(|&(cx, _)| cx).max().unwrap_or(0);
-        let max_cy = cells.iter().map(|&(_, cy)| cy).max().unwrap_or(0);
-        let width = i32::from(max_cx - min_cx) + 1;
-        let x_offset = (4 - width + 1) / 2;
+/// 種別ごとのプレビュースプライトのキャッシュ (添字は [`Tetromino`] の宣言順)。
+///
+/// スプライト VRAM は参照カウント管理 ([`SpriteVram`]) のため、ここで保持して
+/// いる限り再生成されず、`Hud` ごと Drop されれば解放される。
+#[derive(Default)]
+struct PreviewSprites([Option<SpriteVram>; 7]);
 
-        for (cx, cy) in cells {
-            let pos = (
-                x0 + x_offset + i32::from(cx - min_cx),
-                y0 + i32::from(max_cy - cy),
-            );
-            self.bg
-                .set_tile_dynamic16(pos, &self.block_tile, piece_effect(kind));
-        }
+impl PreviewSprites {
+    /// `kind` のプレビュースプライトを返す (初回のみ生成)。
+    fn get(&mut self, kind: Tetromino) -> SpriteVram {
+        self.0[kind as usize]
+            .get_or_insert_with(|| make_preview_sprite(kind))
+            .clone()
     }
+}
+
+/// ミノ 1 種のプレビュースプライト (32×16, 4bpp) を生成して VRAM へ置く。
+///
+/// スポーン向き ([`Rotation::Spawn`]) の形をフィールドと同じベベル付きブロック
+/// ([`draw_block_bevel`]) で描き、スプライト内でピクセル単位にセンタリングする
+/// (I: x0/y4、O: x8/y0、その他 3 セル幅: x4/y0)。色は背景と同内容の OBJ
+/// パレット ([`obj_piece_palette`])。
+fn make_preview_sprite(kind: Tetromino) -> SpriteVram {
+    let mut sprite = DynamicSprite16::new(Size::S32x16);
+
+    let cells = kind.cells(Rotation::Spawn);
+    let min_cx = cells.iter().map(|&(cx, _)| cx).min().unwrap_or(0);
+    let max_cx = cells.iter().map(|&(cx, _)| cx).max().unwrap_or(0);
+    let min_cy = cells.iter().map(|&(_, cy)| cy).min().unwrap_or(0);
+    let max_cy = cells.iter().map(|&(_, cy)| cy).max().unwrap_or(0);
+    let x0 = (32 - i32::from(max_cx - min_cx + 1) * 8) / 2;
+    let y0 = (16 - i32::from(max_cy - min_cy + 1) * 8) / 2;
+
+    for (cx, cy) in cells {
+        // セル座標は y 上向き (§1.1) なので、描画時は上下を反転する。
+        let bx = (x0 + i32::from(cx - min_cx) * 8) as usize;
+        let by = (y0 + i32::from(max_cy - cy) * 8) as usize;
+        draw_block_bevel(|dx, dy, colour| sprite.set_pixel(bx + dx, by + dy, colour));
+    }
+
+    sprite.to_vram(obj_piece_palette(kind))
 }

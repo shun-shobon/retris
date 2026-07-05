@@ -128,11 +128,6 @@ impl Font {
         }
     }
 
-    /// 全透過タイル。文字以外のクリア用途にも使える。
-    pub fn blank(&self) -> &DynamicTile16 {
-        &self.blank
-    }
-
     /// グリフ文字列を描く。空白と未収録文字は透過タイルになる。
     pub fn write(&self, bg: &mut RegularBackground, x: i32, y: i32, text: &[u8]) {
         for (i, &c) in text.iter().enumerate() {

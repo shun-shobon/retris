@@ -103,6 +103,14 @@ pub(crate) fn init_palettes(gfx: &mut Graphics<'_>) {
     gfx.set_background_palettes(&PALETTES);
 }
 
+/// ミノ色のスプライト用パレット (背景パレットと同レイアウト・同色)。
+///
+/// OBJ パレットは背景パレットとは別領域のため、プレビュースプライト生成時に
+/// ここから割り当てる (agb 側が同一 `&'static` の再割当を共有してくれる)。
+pub(crate) fn obj_piece_palette(kind: Tetromino) -> &'static Palette16 {
+    &PALETTES[palette_of(kind) as usize]
+}
+
 /// ミノ種別 → 背景パレット番号 (1..=7)。
 const fn palette_of(kind: Tetromino) -> u8 {
     match kind {
@@ -268,18 +276,29 @@ fn overlay(cells: &mut [[Cell; FIELD_WIDTH]; VISIBLE_HEIGHT], piece: &ActivePiec
     }
 }
 
-/// ベベル付き塗りつぶしブロック: 左上辺ハイライト・右下辺影・中央は基本色。
-/// HUD のミノプレビューにも同じ形状を使う。
+/// ベベル付きブロック 1 セル (8×8) を任意のピクセル書き込み先へ描く:
+/// 左上辺ハイライト・右下辺影 (角は影優先)・中央は基本色。
+/// タイル (フィールド・ホールド枠) とスプライト (HUD のミノプレビュー) で
+/// 同じ見た目を共有するための共通実装。
+pub(crate) fn draw_block_bevel(mut set_pixel: impl FnMut(usize, usize, u8)) {
+    for y in 0..8 {
+        for x in 0..8 {
+            let colour = if x == 7 || y == 7 {
+                IDX_DARK
+            } else if x == 0 || y == 0 {
+                IDX_LIGHT
+            } else {
+                IDX_BASE
+            };
+            set_pixel(x, y, colour);
+        }
+    }
+}
+
+/// ベベル付き塗りつぶしブロックのタイル ([`draw_block_bevel`] 参照)。
 pub(crate) fn make_block_tile() -> DynamicTile16 {
-    let mut tile = DynamicTile16::new().fill_with(IDX_BASE);
-    for i in 0..8 {
-        tile.set_pixel(i, 0, IDX_LIGHT);
-        tile.set_pixel(0, i, IDX_LIGHT);
-    }
-    for i in 0..8 {
-        tile.set_pixel(i, 7, IDX_DARK);
-        tile.set_pixel(7, i, IDX_DARK);
-    }
+    let mut tile = DynamicTile16::new();
+    draw_block_bevel(|x, y, colour| tile.set_pixel(x, y, colour));
     tile
 }
 
