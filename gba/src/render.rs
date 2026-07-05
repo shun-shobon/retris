@@ -154,8 +154,11 @@ impl Renderer {
     ///
     /// パレットは [`init_palettes`] で登録済みであること。
     pub fn new() -> Self {
+        // P1: HUD (P0) より奥に置く。同 Priority だと BG 番号 (show 順) 依存の
+        // z 順序になり、HUD レイヤに描く GAME OVER オーバーレイがフィールドの
+        // 不透明タイルに隠れるため、明示的に一段下げる。
         let mut bg = RegularBackground::new(
-            Priority::P0,
+            Priority::P1,
             RegularBackgroundSize::Background32x32,
             TileFormat::FourBpp,
         );
