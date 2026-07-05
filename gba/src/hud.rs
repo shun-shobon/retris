@@ -1,4 +1,4 @@
-//! 右側 HUD: スコア・レベル・消去ライン・ネクスト 5・ホールド (+B2B/コンボ表示)。
+//! HUD: スコア・レベル・消去ライン・ネクスト 5・ホールド (+B2B/コンボ表示)。
 //!
 //! プレイフィールドとは別の背景レイヤ 1 枚に描く。ラベルと数字は自作 5×7 ピクセル
 //! フォント ([`crate::font::Font`])、ミノプレビューはフィールドと同じブロック
@@ -6,7 +6,7 @@
 //!
 //! フィールド上のオーバーレイ (PAUSE / GAME OVER) もこのレイヤに描く。
 //! HUD は [`Priority::P0`]、フィールドは `Priority::P1` のため HUD が常に手前に
-//! 出る。フィールド領域 x2..=11 は HUD レイヤでは通常透過で、オーバーレイの
+//! 出る。フィールド領域 x10..=19 は HUD レイヤでは通常透過で、オーバーレイの
 //! 文字タイルだけがフィールドに重なって見える。
 
 use agb::display::{
@@ -16,12 +16,13 @@ use agb::display::{
 use retris_core::{Game, LockEvent, NEXT_COUNT, Phase, Rotation, Tetromino};
 
 use crate::font::Font;
-use crate::render::{make_block_tile, piece_effect, ui_effect};
+use crate::render::{FIELD_ORIGIN_TX, make_block_tile, piece_effect, ui_effect};
 
-// ---- レイアウト (タイル座標)。フィールドは x1..=12、HUD は x14 以降 ----
+// ---- レイアウト (タイル座標)。フィールドは中央 x9..=20、HUD はその左右 ----
 
-/// 左カラム (ホールド・スコア・レベル・ライン・演出) の左端。
-const HUD_X: i32 = 14;
+/// 右カラム (ホールド・スコア・レベル・ライン・演出) の左端。
+/// 右壁 (x=20) から 1 タイル空け、SCORE 8 桁 (x22..=29) が画面右端で収まる位置。
+const HUD_X: i32 = 22;
 /// "HOLD" ラベルの行。
 const HOLD_LABEL_Y: i32 = 0;
 /// ホールド枠 (6×4、内側 4×2 がプレビュー) の左上。
@@ -44,8 +45,9 @@ const FX_COMBO_Y: i32 = 16;
 /// 演出行の表示フレーム数 (約 2 秒)。
 const FX_FRAMES: u8 = 120;
 
-/// 右カラム (ネクスト) の左端。プレビューは 4×2 セル。
-const NEXT_X: i32 = 24;
+/// 左カラム (ネクスト) の左端。プレビューは 4×2 セル。
+/// 左サイド x0..=8 のうち、左壁 (x=9) との間に余白が残るよう左寄り。
+const NEXT_X: i32 = 2;
 const NEXT_LABEL_Y: i32 = 0;
 /// ネクスト i 番目のスロット上端 = `NEXT_SLOT_Y0 + i * NEXT_SLOT_PITCH`。
 const NEXT_SLOT_Y0: i32 = 2;
@@ -53,6 +55,10 @@ const NEXT_SLOT_PITCH: i32 = 3;
 
 /// フィールド上オーバーレイの行 (フィールド中央付近)。
 const OVERLAY_Y: i32 = 9;
+/// 「PAUSE」(5 文字) をフィールド 10 列の中央に置く左端。
+const PAUSE_X: i32 = FIELD_ORIGIN_TX + 2;
+/// 「GAME OVER」(9 文字) をフィールド 10 列の中央に置く左端。
+const GAME_OVER_X: i32 = FIELD_ORIGIN_TX;
 
 /// 前フレームに描画した HUD の値。変化検出用。
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,12 +179,12 @@ impl Hud {
     /// フィールド中央の「PAUSE」表示を出す/消す (§14.3)。
     pub fn set_pause_overlay(&mut self, shown: bool) {
         let text: &[u8] = if shown { b"PAUSE" } else { b"     " };
-        self.write(4, OVERLAY_Y, text);
+        self.write(PAUSE_X, OVERLAY_Y, text);
     }
 
     /// フィールド中央に「GAME OVER」を表示する (§14.4)。
     pub fn draw_game_over_overlay(&mut self) {
-        self.write(2, OVERLAY_Y, b"GAME OVER");
+        self.write(GAME_OVER_X, OVERLAY_Y, b"GAME OVER");
     }
 
     /// ロック演出行を更新する。B2B・コンボ (1 以上) のどちらも無ければ消す。
