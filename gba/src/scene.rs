@@ -15,6 +15,13 @@ use crate::hud::Hud;
 use crate::render::Renderer;
 use crate::title::TitleScreen;
 
+/// ゲームオーバー直後に入力を無視するフレーム数 (約 0.5 秒)。
+///
+/// トップアウトを起こしたハードドロップ連打の後続押下が「任意ボタン」に
+/// 食われて GAME OVER 画面が一瞬で飛ばされるのを防ぎつつ、結果を
+/// 見せる間を作る。
+const GAME_OVER_LOCKOUT_FRAMES: u8 = 30;
+
 /// 現在の画面。
 pub enum Scene {
     /// タイトル (§14.1)。シード収集とレベル選択。
@@ -22,7 +29,14 @@ pub enum Scene {
     /// プレイ中 (§14.2, §14.3)。ポーズ表示もこの中で扱う。
     Playing(PlayScreen),
     /// ゲームオーバー (§14.4)。盤面を残したまま任意ボタン待ち。
-    GameOver(PlayScreen),
+    GameOver {
+        play: PlayScreen,
+        /// 入力を無視する残りフレーム数。
+        lockout: u8,
+        /// 無視期間の後に全ボタンが離された状態を観測したか。
+        /// これが立つまで押下エッジを受け付けない (押しっぱなし対策)。
+        released_seen: bool,
+    },
 }
 
 impl Scene {
@@ -46,17 +60,44 @@ impl Scene {
             Self::Playing(mut play) => {
                 if play.update(input, audio) {
                     agb::println!("retris: game over (score={})", play.game.score());
-                    Self::GameOver(play)
+                    Self::GameOver {
+                        play,
+                        lockout: GAME_OVER_LOCKOUT_FRAMES,
+                        released_seen: false,
+                    }
                 } else {
                     Self::Playing(play)
                 }
             }
-            Self::GameOver(play) => {
-                // 任意ボタンの新規押下で TITLE へ (押しっぱなしでは遷移しない)。
-                if input.is_just_pressed(ButtonState::all()) {
+            Self::GameOver {
+                play,
+                lockout,
+                released_seen,
+            } => {
+                // 任意ボタンの新規押下で TITLE へ。ただしトップアウトを起こした
+                // 押下 (ハードドロップ連打など) を誤って拾わないよう二段ガード:
+                // (1) 遷移直後の一定フレームは入力を無視する。
+                // (2) その後も全ボタンが一度離されてからの新規押下のみ受け付ける。
+                if lockout > 0 {
+                    Self::GameOver {
+                        play,
+                        lockout: lockout - 1,
+                        released_seen,
+                    }
+                } else if !released_seen {
+                    Self::GameOver {
+                        play,
+                        lockout,
+                        released_seen: !input.is_pressed(ButtonState::all()),
+                    }
+                } else if input.is_just_pressed(ButtonState::all()) {
                     Self::Title(TitleScreen::new())
                 } else {
-                    Self::GameOver(play)
+                    Self::GameOver {
+                        play,
+                        lockout,
+                        released_seen,
+                    }
                 }
             }
         }
@@ -66,7 +107,7 @@ impl Scene {
     pub fn show(&self, frame: &mut GraphicsFrame<'_>) {
         match self {
             Self::Title(title) => title.show(frame),
-            Self::Playing(play) | Self::GameOver(play) => play.show(frame),
+            Self::Playing(play) | Self::GameOver { play, .. } => play.show(frame),
         }
     }
 }
